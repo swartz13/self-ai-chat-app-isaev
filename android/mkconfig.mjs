@@ -29,9 +29,12 @@ const models = (env.CHAT_MODELS || '').split(',').map((e) => e.trim()).filter(Bo
   return id ? { id, label: label || id } : null;
 }).filter(Boolean);
 
+const isPublic = process.env.PUBLIC_RELEASE === '1' || process.env.PUBLIC_RELEASE === 'true';
+const isPlaceholder = (k) => k.includes('your-openrouter-key') || k.includes('your-huggingface-key');
+
 const cfg = {
-  openrouterKeys: keys(env.OPENROUTER_API_KEYS || env.OPENROUTER_API_KEY),
-  hfKeys: keys(env.HF_API_KEYS || env.HF_API_KEY),
+  openrouterKeys: isPublic ? [] : keys(env.OPENROUTER_API_KEYS || env.OPENROUTER_API_KEY).filter((k) => !isPlaceholder(k)),
+  hfKeys: isPublic ? [] : keys(env.HF_API_KEYS || env.HF_API_KEY).filter((k) => !isPlaceholder(k)),
   chatModels: models,
   imageModel: env.IMAGE_MODEL || 'google/gemini-2.5-flash-image',
   imageMaxTokens: Number(env.IMAGE_MAX_TOKENS) || 4096,
