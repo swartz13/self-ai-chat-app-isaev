@@ -134,7 +134,7 @@ All screenshots are captured directly from the standalone Android build running 
 The Android version requires **no background server**. Your device communicates directly with OpenRouter and Hugging Face.
 
 ### Method 1: Sideloading Prebuilt APK
-1. Download the latest `isaev.apk` (or `isaev-v1.0.0.apk`) from the GitHub Releases section.
+1. Download the latest `isaev.apk` from the GitHub Releases section.
 2. Transfer the APK to your device or download directly on your phone.
 3. Tap the file in your Android File Manager. When prompted, allow installation from unknown sources.
 4. Launch **ISAEV**, tap the **Settings** (gear) icon in the top bar, and paste your API key.

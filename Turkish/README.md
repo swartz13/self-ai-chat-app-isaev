@@ -136,7 +136,7 @@ Aşağıdaki ekran görüntüleri, uygulamanın Android cihaz üzerindeki bağı
 Android sürümü bilgisayarınızda **sunucu açık olmasını gerektirmez**. Telefonunuz doğrudan OpenRouter ve Hugging Face servisleriyle konuşur.
 
 ### Yöntem 1: Hazır APK'yı Yükleme
-1. GitHub Releases bölümünden en güncel `isaev.apk` (veya `isaev-v1.0.0.apk`) dosyasını indirin.
+1. GitHub Releases bölümünden en güncel `isaev.apk` dosyasını indirin.
 2. Dosyayı telefonunuza aktarın veya doğrudan telefondan indirin.
 3. Dosya yöneticisinden APK dosyasına dokunun ve bilinmeyen kaynaklardan yüklemeye izin verin.
 4. Uygulamayı açın, sağ üstteki **Ayarlar** (çark) simgesine tıklayarak OpenRouter veya Hugging Face anahtarınızı yapıştırın.

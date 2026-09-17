@@ -17,7 +17,7 @@ ISAEV is designed from the ground up to leverage the rich ecosystem of **100% fr
 ## Installation
 
 ### Method 1: Direct APK Sideload
-1. Download `isaev.apk` (or `isaev-v1.0.0.apk`) from GitHub Releases.
+1. Download `isaev.apk` from GitHub Releases.
 2. Tap the downloaded APK in your Android File Manager.
 3. If prompted, grant permission to "Install unknown apps".
 4. Launch **ISAEV**, tap **Settings** (gear icon in the top right), and enter your OpenRouter or Hugging Face API key.
