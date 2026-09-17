@@ -731,7 +731,7 @@ button {
   .suggestions { grid-template-columns: 1fr; }
 }
 
-/* ============================ BAKIYE ROZETI ============================ */
+/* ============================ BALANCE BADGE ============================ */
 .balance-chip {
   display: inline-flex;
   align-items: center;
@@ -789,7 +789,7 @@ button {
   stroke: #ffffff;
 }
 
-/* ============================ AYARLAR MODALI ============================ */
+/* ============================ SETTINGS MODAL ============================ */
 .modal-backdrop {
   position: fixed;
   inset: 0;

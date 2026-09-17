@@ -20,7 +20,7 @@ scratch/
 # Android Build Artifacts & Signing Keystores
 android/build/
 android/assets/www/
-android/oxalpha.keystore
+android/*.keystore
 *.apk
 *.idsig
 

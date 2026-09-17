@@ -25,7 +25,7 @@ const MIME = {
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 };
 
-/** Yuklenen tek bir dosyayi analiz edip tipini ve (varsa) metnini cikarir. */
+/** Inspects an uploaded file, identifies its kind, and extracts text if applicable. */
 export async function inspectFile(diskPath, originalName) {
   const ext = path.extname(originalName || diskPath).toLowerCase();
   const mime = MIME[ext] || 'application/octet-stream';
@@ -40,25 +40,25 @@ export async function inspectFile(diskPath, originalName) {
       const { value } = await mammoth.extractRawText({ path: diskPath });
       return { kind: 'text', ext, mime, text: value.trim() };
     } catch (e) {
-      return { kind: 'unsupported', ext, mime, error: `DOCX okunamadi: ${e.message}` };
+      return { kind: 'unsupported', ext, mime, error: `Could not read DOCX: ${e.message}` };
     }
   }
 
   if (TEXT_EXT.has(ext) || !ext) {
     const buf = await readFile(diskPath);
-    // Ikili dosyalari metin sanmamak icin NUL baytina bak.
-    if (buf.includes(0)) return { kind: 'unsupported', ext, mime, error: 'Ikili dosya, metne cevrilemedi.' };
+    // Prevent treating binary files as plain text
+    if (buf.includes(0)) return { kind: 'unsupported', ext, mime, error: 'Binary file, cannot be parsed as text.' };
     return { kind: 'text', ext, mime, text: buf.toString('utf8') };
   }
 
-  return { kind: 'unsupported', ext, mime, error: `${ext || 'bilinmeyen'} uzantisi desteklenmiyor.` };
+  return { kind: 'unsupported', ext, mime, error: `File format ${ext || 'unknown'} is not supported.` };
 }
 
-const MAX_TEXT_CHARS = 400_000; // ~100k token, 1M context icinde rahat siger
+const MAX_TEXT_CHARS = 400_000; // ~100k tokens, fits comfortably in large contexts
 
 /**
- * Kayitli eklerden OpenRouter "content parts" dizisi uretir.
- * Donus: { parts, needsPdfPlugin, notes }
+ * Builds OpenAI-compatible content parts from uploaded attachments.
+ * Returns: { parts, needsPdfPlugin, notes }
  */
 export async function buildContentParts(text, attachments) {
   const parts = [];
@@ -91,22 +91,22 @@ export async function buildContentParts(text, attachments) {
       let body = att.text ?? (await readFile(diskPath, 'utf8'));
       if (body.length > MAX_TEXT_CHARS) {
         body = body.slice(0, MAX_TEXT_CHARS);
-        notes.push(`${name} cok uzun oldugu icin ilk ${MAX_TEXT_CHARS} karakteri alindi.`);
+        notes.push(`${name} was truncated to the first ${MAX_TEXT_CHARS} characters.`);
       }
-      parts.push({ type: 'text', text: `<dosya adi="${name}">\n${body}\n</dosya>` });
+      parts.push({ type: 'text', text: `<file name="${name}">\n${body}\n</file>` });
       continue;
     }
 
     if (kind === 'audio') {
-      notes.push(`${name}: Ox Alpha ses girdisi desteklemiyor, dosya atlandi.`);
+      notes.push(`${name}: Audio input is not supported by this model, file skipped.`);
       continue;
     }
 
-    notes.push(`${name}: ${att.error || 'desteklenmeyen dosya'}, atlandi.`);
+    notes.push(`${name}: ${att.error || 'unsupported file'}, skipped.`);
   }
 
   if (text && text.trim()) parts.push({ type: 'text', text });
-  if (parts.length === 0) parts.push({ type: 'text', text: '(bos mesaj)' });
+  if (parts.length === 0) parts.push({ type: 'text', text: '(empty message)' });
 
   return { parts, needsPdfPlugin, notes };
 }

@@ -1,10 +1,20 @@
+<p align="center">
+  <img src="docs/images/logo.png" width="128" height="128" alt="ISAEV Logo" style="border-radius: 28px;">
+</p>
+
 # ISAEV — Private, Standalone AI Client for Web & Android
 
 ISAEV is a minimalist, privacy-first AI client engineered for direct interaction with modern large language models via **OpenRouter** and **Hugging Face**. Built with a local-first philosophy, ISAEV eliminates third-party telemetry, tracking, and intermediate servers.
 
-On desktop, ISAEV operates as a lightweight local server backed by SQLite. On Android, it compiles into a **100% standalone APK** powered by an in-app client-side engine (`local-backend.js` + IndexedDB) that connects directly from your phone to AI providers—no home server or computer connection required.
-
 [🇹🇷 Türkçe Dokümantasyon için tıklayın](Turkish/README.md)
+
+---
+
+## Free-Tier First, With Optional Paid Scaling
+
+ISAEV was built primarily to unleash the power of **100% free AI models**:
+- **Zero Cost, Zero Subscriptions**: Models such as **Ling 3.0 Flash**, **Nemotron Super 120B**, **Dots3 Note**, **North Mini Code**, and **Free Router** allow immediate chatting, coding, and document analysis without entering a credit card or paying a dime.
+- **Optional Paid Models**: If you want state-of-the-art reasoning, ultra-fast generation, or massive context windows, you can optionally top up a small balance ($1–$5) on OpenRouter or Hugging Face to unlock premium models (such as **GLM-5.3 Flash**, **DeepSeek V3.2**, etc.) seamlessly. The app displays token consumption and live remaining account balance in real-time.
 
 ---
 
@@ -72,7 +82,7 @@ All screenshots are captured directly from the standalone Android build running 
 | Dimension | Desktop Web | Android Standalone APK |
 |---|---|---|
 | **Backend Engine** | Node.js + Express | `local-backend.js` (In-WebView Fetch Interceptor) |
-| **Database** | SQLite (`data/chat.db`) | Browser IndexedDB (`oxalpha`) |
+| **Database** | SQLite (`data/chat.db`) | Browser IndexedDB (`isaev`) |
 | **File Storage** | Local Disk (`data/uploads`) | IndexedDB Blobs / Blob URLs |
 | **API Connectivity** | Server → Provider API | Mobile Device → Provider API (Direct HTTPS) |
 | **Prerequisites** | Node.js 18+ | None (Install standalone APK) |
@@ -124,7 +134,7 @@ All screenshots are captured directly from the standalone Android build running 
 The Android version requires **no background server**. Your device communicates directly with OpenRouter and Hugging Face.
 
 ### Method 1: Sideloading Prebuilt APK
-1. Download the latest `OxAlpha.apk` from the GitHub Releases section.
+1. Download the latest `isaev.apk` (or `isaev-v1.0.0.apk`) from the GitHub Releases section.
 2. Transfer the APK to your device or download directly on your phone.
 3. Tap the file in your Android File Manager. When prompted, allow installation from unknown sources.
 4. Launch **ISAEV**, tap the **Settings** (gear) icon in the top bar, and paste your API key.
@@ -150,9 +160,9 @@ export ANDROID_HOME=/data/android-sdk  # Set your Android SDK path
 bash android/build.sh
 ```
 
-- **Output**: `OxAlpha.apk` generated in the root directory.
+- **Output**: `isaev.apk` generated in the root directory.
 - **Build Tools**: Tested with Build-Tools `35.0.0` and Target SDK `34`.
-- **Signing**: Automatically creates a local release keystore (`android/oxalpha.keystore`) if none exists.
+- **Signing**: Automatically creates a local release keystore (`android/isaev.keystore`) if none exists.
 
 ---
 

@@ -144,10 +144,10 @@
       const line = lines[i];
       const m = line.match(/^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/);
 
-      // Ayni seviyede yeni bir madde
+      // Next item at same indent level
       if (m && m[1].length <= indent + 1) {
         if (m[1].length < indent) break;
-        if (/\d/.test(m[2]) !== ordered) break; // isaretci tipi degisti: yeni liste
+        if (/\d/.test(m[2]) !== ordered) break; // marker type changed: new list
         current = [m[3]];
         items.push(current);
         i++; blank = false;

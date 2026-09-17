@@ -1,10 +1,22 @@
+<p align="center">
+  <img src="../docs/images/logo.png" width="128" height="128" alt="ISAEV Logo" style="border-radius: 28px;">
+</p>
+
 # ISAEV — Web ve Android İçin Bağımsız, Gizlilik Odaklı Yapay Zeka İstemcisi
 
-ISAEV; **OpenRouter** ve **Hugging Face** üzerindeki modern büyük dil modelleriyle doğrudan iletişim kurmak üzere tasarlanmış, aracı sunucu ve telemetri içermeyen bağımsız bir yapay zeka arayüzüdür. Yerel öncelikli (local-first) mimariyle geliştirilmiştir; kullanıcı verilerini, sohbet geçmişini ve API anahtarlarını harici üçüncü taraf sunuculara aktarmaz.
+ISAEV; **OpenRouter** ve **Hugging Face** üzerindeki modern büyük dil modelleriyle doğrudan iletişim kurmak üzere tasarlanmış, aracı sunucu ve telemetri içermeyen bağımsız bir yapay zeka istemcisidir. Yerel öncelikli (local-first) mimariyle geliştirilmiştir; kullanıcı verilerini, sohbet geçmişini ve API anahtarlarını harici sunuculara aktarmaz.
 
-Masaüstünde SQLite veritabanı ile çalışan hafif bir Node.js yerel sunucusu olarak görev yapar. Android tarafında ise **arka uç sunucusuna ihtiyaç duymayan**, tamamen bağımsız bir APK olarak derlenir. Telefonunuzun içinde çalışan istemci motoru (`local-backend.js` + IndexedDB), telefonunuzu doğrudan yapay zeka sağlayıcılarına bağlar; evinizdeki bilgisayarı açık bırakmanız gerekmez.
+Masaüstünde SQLite veritabanı ile çalışan hafif bir Node.js yerel sunucusu olarak görev yapar. Android tarafında ise **arka uç sunucusuna ihtiyaç duymayan**, tamamen bağımsız bir APK (`isaev.apk`) olarak derlenir. Telefonunuzun içinde çalışan istemci motoru (`local-backend.js` + IndexedDB), telefonunuzu doğrudan yapay zeka sağlayıcılarına bağlar; evinizdeki bilgisayarı açık bırakmanız gerekmez.
 
 [🇬🇧 Click for English Documentation](../README.md)
+
+---
+
+## Ücretsiz Yapay Zeka Öncelikli, İsteğe Bağlı Ücretli Bakiye Desteği
+
+ISAEV'in temel varoluş amacı, herkesin **%100 ücretsiz yapay zekalardan** kolayca ve sınırsızca yararlanabilmesini sağlamaktır:
+- **Sıfır Maliyet, Sıfır Abonelik**: **Ling 3.0 Flash**, **Nemotron Super 120B**, **Dots3 Note**, **North Mini Code** ve **Free Router** gibi OpenRouter ve Hugging Face üzerindeki tamamen ücretsiz modeller sayesinde kredi kartı girmeden ve hiçbir ücret ödemeden anında sohbet edebilir, kod yazdırabilir ve belgelerinizi analiz ettirebilirsiniz.
+- **İsteğe Bağlı Ücretli Modellere Geçiş**: Eğer daha gelişmiş akıl yürütme, görsel üretim veya çok adımlı karmaşık görevler için ücretli modelleri (örneğin **GLM-5.3 Flash**, **DeepSeek V3.2** vb.) kullanmak isterseniz, OpenRouter veya Hugging Face hesabınıza cüzi bir bakiye (1–5 dolar gibi) yükleyerek bu modelleri de kesintisiz kullanabilirsiniz. Arayüz harcanan token maliyetini ve kalan bakiyenizi anlık olarak gösterir.
 
 ---
 
@@ -72,7 +84,7 @@ Aşağıdaki ekran görüntüleri, uygulamanın Android cihaz üzerindeki bağı
 | Boyut | Masaüstü Web Sürümü | Android Bağımsız APK |
 |---|---|---|
 | **Arka Uç Motoru** | Node.js + Express | `local-backend.js` (WebView içi Fetch Yakalayıcı) |
-| **Veritabanı** | SQLite (`data/chat.db`) | Tarayıcı IndexedDB (`oxalpha`) |
+| **Veritabanı** | SQLite (`data/chat.db`) | Tarayıcı IndexedDB (`isaev`) |
 | **Dosya Saklama** | Yerel Disk (`data/uploads`) | IndexedDB Blob / Blob URL |
 | **API İletişimi** | Sunucu → Sağlayıcı API | Cihaz → Sağlayıcı API (Doğrudan HTTPS) |
 | **Gereksinimler** | Node.js 18+ | Yok (Doğrudan kurulan APK) |
@@ -124,7 +136,7 @@ Aşağıdaki ekran görüntüleri, uygulamanın Android cihaz üzerindeki bağı
 Android sürümü bilgisayarınızda **sunucu açık olmasını gerektirmez**. Telefonunuz doğrudan OpenRouter ve Hugging Face servisleriyle konuşur.
 
 ### Yöntem 1: Hazır APK'yı Yükleme
-1. GitHub Releases bölümünden en güncel `OxAlpha.apk` dosyasını indirin.
+1. GitHub Releases bölümünden en güncel `isaev.apk` (veya `isaev-v1.0.0.apk`) dosyasını indirin.
 2. Dosyayı telefonunuza aktarın veya doğrudan telefondan indirin.
 3. Dosya yöneticisinden APK dosyasına dokunun ve bilinmeyen kaynaklardan yüklemeye izin verin.
 4. Uygulamayı açın, sağ üstteki **Ayarlar** (çark) simgesine tıklayarak OpenRouter veya Hugging Face anahtarınızı yapıştırın.
@@ -150,9 +162,9 @@ export ANDROID_HOME=/data/android-sdk  # SDK yolunuzu belirtin
 bash android/build.sh
 ```
 
-- **Çıktı**: Kök dizinde `OxAlpha.apk` üretilir.
+- **Çıktı**: Kök dizinde `isaev.apk` üretilir.
 - **Hız**: Ortalama 2-3 saniye sürer.
-- **İmza**: Mevcut değilse otomatik olarak yerel anahtar deposu (`android/oxalpha.keystore`) üretilip APK imzalanır.
+- **İmza**: Mevcut değilse otomatik olarak yerel anahtar deposu (`android/isaev.keystore`) üretilip APK imzalanır.
 
 ---
 

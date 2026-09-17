@@ -1,72 +1,74 @@
-# ISAEV — Android
+# ISAEV — Android Standalone Guide
 
-`OxAlpha.apk` **tek başına çalışır**. Bilgisayarınızda sunucu açık olmasına
-gerek yoktur; telefon doğrudan OpenRouter ve HuggingFace'e bağlanır.
+`isaev.apk` operates **100% standalone**. There is no need to keep a server running on your computer; your phone connects directly to OpenRouter and Hugging Face over HTTPS.
 
-## Kurulum
+[🇹🇷 Türkçe Android Rehberi için tıklayın](Turkish/ANDROID.md)
 
-### En güvenilir yol: USB
+---
 
-Bazı telefonlar (Oppo/ColorOS, Xiaomi/MIUI) kendi yükleyicileriyle sideload'u
-engelleyip yalnızca *"Uygulama yüklenmedi"* der; sebebi söylemez. USB yolu bu
-kısıtlamaları atlar ve sorun çıkarsa **gerçek hata kodunu** gösterir.
+## Free-Tier First Architecture
 
-1. Telefonda: **Ayarlar > Telefon hakkında > Sürüm**, *"Derleme numarası"*na 7 kez dokunun.
-2. **Ayarlar > Ek ayarlar > Geliştirici seçenekleri**: *USB hata ayıklama* ve
-   *USB üzerinden yüklemeye izin ver* açık olsun.
-3. USB kablosunu takın, telefonda çıkan izin penceresinde
-   *"Bu bilgisayara her zaman izin ver"* işaretleyip onaylayın.
-4. Bilgisayarda:
+ISAEV is designed from the ground up to leverage the rich ecosystem of **100% free AI models** available on OpenRouter and Hugging Face:
+- Free models like **Ling 3.0 Flash**, **Nemotron Super 120B**, **Dots3 Note**, and **Free Router** allow immediate chatting without spending any money or requiring a credit card.
+- **Optional Paid Scaling**: If you wish to use advanced reasoning models (e.g., `z-ai/glm-5.3-flash`, `DeepSeek V3.2`, etc.), you can optionally top up a small balance ($1–$5) on your OpenRouter/HF account. The app displays real-time token cost and your remaining credit balance automatically.
 
-```bash
-export ANDROID_HOME=/data/android-sdk
-bash android/install-usb.sh
-```
+---
 
-Betik telefonu bulur, Android sürümünü yazar, kurar ve uygulamayı açar.
+## Installation
 
-### Dosyaya dokunarak (telefon izin veriyorsa)
+### Method 1: Direct APK Sideload
+1. Download `isaev.apk` (or `isaev-v1.0.0.apk`) from GitHub Releases.
+2. Tap the downloaded APK in your Android File Manager.
+3. If prompted, grant permission to "Install unknown apps".
+4. Launch **ISAEV**, tap **Settings** (gear icon in the top right), and enter your OpenRouter or Hugging Face API key.
 
-`OxAlpha.apk`'yı telefona kopyalayıp dosya yöneticisinden dokunun. Android
-*"bilinmeyen kaynaklardan uygulamaya izin ver"* diye sorarsa izin verin.
-ColorOS'ta ayrıca **Ayarlar > Güvenlik > Harici kaynaklardan uygulama yükle**
-altında dosya yöneticisine tek tek izin vermek gerekebilir.
+### Method 2: Reliable USB Installation via ADB
+Some vendor systems (Oppo ColorOS, Xiaomi MIUI/HyperOS) may restrict sideloading through the file manager. The USB method bypasses these restrictions and displays true diagnostic error codes if something goes wrong:
 
-## Nasıl çalışıyor
+1. On your phone: Go to **Settings > About Phone > Version**, tap **Build number** 7 times.
+2. Go to **Settings > Additional Settings > Developer options**:
+   - Enable **USB debugging**.
+   - Enable **Install via USB**.
+3. Connect the phone with a USB cable. On the popup prompt, check *"Always allow from this computer"* and tap OK.
+4. On your computer:
+   ```bash
+   export ANDROID_HOME=/data/android-sdk  # Set your SDK path
+   bash android/install-usb.sh
+   ```
+   The script detects your device, reports the Android version, installs `isaev.apk`, and launches the app automatically.
 
-Masaüstü sürümde arayüz `/api/...` adreslerine istek atar, Node sunucusu yanıtlar.
-Telefonda Node yok. `local-backend.js` tarayıcının `fetch` işlevini sarmalayıp
-aynı adresleri uygulamanın **içinde** karşılar:
+---
 
-| | Masaüstü | Android |
+## How It Works
+
+| Layer | Desktop Web | Android Standalone APK |
 |---|---|---|
-| Arka uç | Node + Express | `local-backend.js` (WebView içinde) |
-| Depolama | SQLite (`data/chat.db`) | IndexedDB |
-| Dosyalar | Diskte (`data/uploads`) | Blob olarak IndexedDB'de |
-| Ağ | Sunucu → OpenRouter / HF | Telefon → OpenRouter / HF (doğrudan) |
+| **Backend** | Node.js + Express | `local-backend.js` (In-WebView Fetch Interceptor) |
+| **Storage** | SQLite (`data/chat.db`) | IndexedDB (`isaev`) |
+| **Files** | Local filesystem (`data/uploads`) | IndexedDB Blobs / Blob URLs |
+| **Network** | Server → Provider API | Device → Provider API (Direct HTTPS) |
 
-Arayüz kodu (`app.js`, `styles.css`, `markdown.js`) **iki ortamda da aynıdır**.
+The user interface code (`app.js`, `styles.css`, `markdown.js`) is identical across both platforms.
 
-## Güvenlik ve Anahtarlar (BYOK)
+---
 
-* **Kendi Anahtarını Getir (BYOK)**: Uygulamayı telefonda açtıktan sonra sağ üstteki **Ayarlar** (çark) simgesine dokunarak OpenRouter veya Hugging Face anahtarlarınızı doğrudan girebilirsiniz. Anahtarlar cihazın yerel `localStorage` alanında saklanır.
-* İsteğe bağlı olarak, derleme esnasında `.env` dosyasında anahtar bırakırsanız bu anahtarlar derleme anında `config.js` içine gömülebilir.
-* Sohbet geçmişi ve yüklenen dosyalar yalnızca telefonun yerel IndexedDB alanında tutulur; sunucuya iletilmez.
-* Veritabanınızı yedeklemek veya başka cihaza aktarmak için Ayarlar menüsündeki **Dışa Aktar** / **İçe Aktar** özelliğini kullanabilirsiniz.
+## Security & BYOK (Bring Your Own Key)
 
-## Yeniden derleme
+- **Client-Side Keys**: API keys are saved locally in the device's secure `localStorage`.
+- **Zero Telemetry**: Requests travel directly from your phone to OpenRouter / Hugging Face. No middleman servers exist.
+- **Database Backup & Migration**: Easily export and restore your entire chat history via JSON through the in-app Settings modal.
+
+---
+
+## Building from Source in 3 Seconds (No Gradle)
+
+This project compiles directly using native Android SDK command-line tools (`aapt2`, `javac`, `d8`, `zipalign`, `apksigner`), bypassing Gradle overhead:
 
 ```bash
 export ANDROID_HOME=/data/android-sdk
-bash android/build.sh          # -> OxAlpha.apk
+bash android/build.sh
 ```
 
-`.env` içindeki anahtarlar ve `CHAT_MODELS` listesi derleme sırasında
-`assets/www/config.js` dosyasına yazılır; ayrıca elle düzenlemeye gerek yoktur.
-
-### Derleme notları
-
-* Gradle kullanılmaz; doğrudan `aapt2` + `javac` + `d8` + `apksigner` çağrılır.
-* `build-tools 34.0.0` içindeki `d8`, JDK 21 altında anonim iç sınıflarda
-  çöküyor (`NullPointerException`). Bu yüzden **35.0.0** kullanılır.
-  Başka sürüm denemek için: `BUILD_TOOLS=36.0.0 bash android/build.sh`
+- **Output**: `isaev.apk` created in the project root.
+- **Speed**: Compiles in ~2–3 seconds.
+- **Signing**: Automatically generates a local release keystore (`android/isaev.keystore`) on the first run.

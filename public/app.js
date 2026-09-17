@@ -332,17 +332,17 @@
     currentId: null,
     messages: [],
     pending: [],          // { localId, name, size, kind, id?, url?, error?, uploading }
-    model: 'stealth/ox-alpha',
+    model: 'inclusionai/ling-3.0-flash-fin:free',
     effort: 'high',
     imageMode: false,
     streaming: false,
     controller: null,
-    config: { chatModel: 'stealth/ox-alpha', chatModels: [], imageModel: '', videoGeneration: false },
+    config: { chatModel: 'inclusionai/ling-3.0-flash-fin:free', chatModels: [], imageModel: '', videoGeneration: false },
     webSearch: false,
     webSearchDefault: false,
     userName: localStorage.getItem('ox.user_name') || '',
     customInstructions: localStorage.getItem('ox.custom_instructions') || '',
-    lang: localStorage.getItem('ox.lang') || 'tr',
+    lang: localStorage.getItem('ox.lang') || 'en',
     customApiKey: localStorage.getItem('ox.custom_openrouter_key') ||
       (window.OX_CONFIG && window.OX_CONFIG.openrouterKeys && window.OX_CONFIG.openrouterKeys[0]) || '',
     customHfKey: localStorage.getItem('ox.custom_hf_key') ||
@@ -352,7 +352,7 @@
 
   function t(key, params) {
     const lang = state.lang || 'tr';
-    let str = (I18N[lang] && I18N[lang][key]) || (I18N.tr && I18N.tr[key]) || key;
+    let str = (I18N[lang] && I18N[lang][key]) || (I18N.en && I18N.en[key]) || key;
     if (params) {
       for (const k of Object.keys(params)) {
         str = str.replace(new RegExp('\\{' + k + '\\}', 'g'), params[k]);
@@ -1281,7 +1281,7 @@
     }
   }
 
-  /* ============================================================ sohbet gezinme */
+  /* ============================================================ conversation routing */
 
   function newChat() {
     if (state.streaming) stopStream();
@@ -1309,7 +1309,7 @@
     state.currentId = data.conversation.id;
     state.messages = data.messages;
     el.chatTitle.textContent = cleanDisplayTitle(data.conversation.title);
-    // Sohbet hangi modelle yurutulduyse seciciyi ona getir.
+    // Sync model picker to the model used in this conversation.
     if (data.conversation.model
         && (state.config.chatModels || []).some((m) => m.id === data.conversation.model)) {
       state.model = data.conversation.model;
@@ -2305,7 +2305,7 @@
         else if (!el.lightbox.hidden) { el.lightbox.hidden = true; el.lightboxImg.src = ''; }
         else if (state.streaming) stopStream();
       }
-      // Ctrl/Cmd + K: aramaya odaklan, Ctrl/Cmd + Shift + O: yeni sohbet
+      // Ctrl/Cmd + K: focus search, Ctrl/Cmd + Shift + O: new chat
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         el.app.classList.remove('collapsed');
@@ -2335,7 +2335,7 @@
     document.documentElement.dataset.theme = localStorage.getItem('ox.theme') || 'dark';
     if (localStorage.getItem('ox.collapsed') === '1') el.app.classList.add('collapsed');
 
-    state.lang = localStorage.getItem('ox.lang') || 'tr';
+    state.lang = localStorage.getItem('ox.lang') || 'en';
     state.userName = localStorage.getItem('ox.user_name') || '';
     state.customInstructions = localStorage.getItem('ox.custom_instructions') || '';
     state.customApiKey = localStorage.getItem('ox.custom_openrouter_key') || '';

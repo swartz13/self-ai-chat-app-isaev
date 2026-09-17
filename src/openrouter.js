@@ -1,6 +1,6 @@
 /**
- * Desteklenen saglayicilar. Ikisi de OpenAI uyumlu /chat/completions sunar,
- * bu yuzden tek istemci ikisine de hizmet eder.
+ * Supported API providers. Both provide OpenAI-compatible /chat/completions endpoints,
+ * allowing a single unified client to serve both.
  */
 export const PROVIDERS = {
   openrouter: {
@@ -19,8 +19,7 @@ export const PROVIDERS = {
 
 /**
  * "hf:Qwen/Qwen3-4B" -> { provider: 'hf', model: 'Qwen/Qwen3-4B' }
- * Onek yoksa OpenRouter varsayilir. OpenRouter kimliklerindeki ":free" eki
- * onek sayilmaz; yalnizca bastaki "hf:" dikkate alinir.
+ * Defaults to OpenRouter if no prefix is present.
  */
 export function splitModel(id) {
   const raw = String(id || '');
@@ -41,14 +40,14 @@ export class OpenRouterError extends Error {
   }
 }
 
-/** Bir saglayicinin .env'deki anahtarlarini okur (virgulle coklu olabilir). */
+/** Reads provider API keys from environment variables (comma-separated). */
 export function apiKeys(provider = 'openrouter') {
   const cfg = PROVIDERS[provider] || PROVIDERS.openrouter;
   const raw = cfg.envKeys.map((k) => process.env[k]).find(Boolean) || '';
   return raw.split(',').map((k) => k.trim()).filter(Boolean);
 }
 
-/** Anahtar sirasi saglayici basina ayri ilerler. */
+/** Per-provider key rotation cursor. */
 const keyCursor = {};
 
 function headers(key, provider) {
@@ -61,15 +60,13 @@ function headers(key, provider) {
 }
 
 const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
-// Bu hatalarda ayni anahtarla beklemek yerine sonraki anahtari denemek mantikli.
 const KEY_SWITCH = new Set([401, 402, 403, 429]);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function toError(res, provider = 'openrouter') {
   let body = null;
-  try { body = await res.json(); } catch { /* metin govdesi */ }
+  try { body = await res.json(); } catch { /* text body */ }
   const err = typeof body?.error === 'string' ? { message: body.error } : (body?.error ?? {});
-  // HuggingFace ayrintiyi baslikta da yollar.
   const detail = err.metadata?.raw || err.message || body?.message
     || res.headers.get('x-error-message') || res.statusText;
   const e = new OpenRouterError(detail, {
@@ -82,24 +79,22 @@ async function toError(res, provider = 'openrouter') {
   return e;
 }
 
-/** Rate-limit ve gecici hatalar icin ustel geri cekilmeli fetch. */
+/** Fetch with exponential backoff and automatic key failover. */
 async function requestWithRetry(path, payloadIn, { retries = 4, signal, provider = 'openrouter' } = {}) {
   let payload = payloadIn;
   const cfg = PROVIDERS[provider] || PROVIDERS.openrouter;
   const keys = apiKeys(provider);
   if (!keys.length) {
     throw new OpenRouterError(
-      `${cfg.label} icin API anahtari tanimli degil (.env icindeki ${cfg.envKeys[0]}).`);
+      `No API key configured for ${cfg.label} (${cfg.envKeys[0]} in .env or via Settings).`);
   }
   if (keyCursor[provider] == null) keyCursor[provider] = 0;
 
   let lastErr;
-  // Her anahtar icin ayri sayac tutmak yerine, anahtar degistirdikce ayni
-  // deneme butcesinden harcariz; boylece toplam bekleme suresi sinirli kalir.
   const totalAttempts = retries + keys.length;
 
   for (let attempt = 0; attempt <= totalAttempts; attempt++) {
-    if (signal?.aborted) throw new OpenRouterError('Istek iptal edildi.', { code: 'aborted' });
+    if (signal?.aborted) throw new OpenRouterError('Request cancelled.', { code: 'aborted' });
 
     const key = keys[keyCursor[provider] % keys.length];
     let res;
@@ -108,8 +103,8 @@ async function requestWithRetry(path, payloadIn, { retries = 4, signal, provider
         method: 'POST', headers: headers(key, provider), body: JSON.stringify(payload), signal,
       });
     } catch (e) {
-      if (e.name === 'AbortError') throw new OpenRouterError('Istek iptal edildi.', { code: 'aborted' });
-      lastErr = new OpenRouterError(`Aga ulasilamadi: ${e.message}`, { retryable: true });
+      if (e.name === 'AbortError') throw new OpenRouterError('Request cancelled.', { code: 'aborted' });
+      lastErr = new OpenRouterError(`Network unreachable: ${e.message}`, { retryable: true });
       await sleep(600 * 2 ** Math.min(attempt, 4));
       continue;
     }
@@ -117,15 +112,14 @@ async function requestWithRetry(path, payloadIn, { retries = 4, signal, provider
 
     lastErr = await toError(res, provider);
 
-    // Bazi modeller max_tokens icin kendi ust sinirini bildirir
-    // ("limited to 16384"). Sinir neyse ona indirip bir kez daha dene.
+    // Auto-adjust if model reports lower max_tokens limit
     const capped = /limited to (\d+)/i.exec(lastErr.message || '');
     if (capped && payload.max_tokens > Number(capped[1])) {
       payload = { ...payload, max_tokens: Number(capped[1]) };
       continue;
     }
 
-    // Anahtara bagli bir hataysa ve elde baska anahtar varsa hemen ona gec.
+    // Switch key immediately on key-related errors
     if (keys.length > 1 && KEY_SWITCH.has(lastErr.status)) {
       keyCursor[provider] = (keyCursor[provider] + 1) % keys.length;
       lastErr.retryable = true;
@@ -134,7 +128,6 @@ async function requestWithRetry(path, payloadIn, { retries = 4, signal, provider
 
     if (!lastErr.retryable || attempt === totalAttempts) throw lastErr;
 
-    // Saglayici bir bekleme suresi onerdiyse ona uy.
     const hinted = Number(res.headers.get('retry-after')) * 1000;
     await sleep(Number.isFinite(hinted) && hinted > 0 ? Math.min(hinted, 15_000) : 800 * 2 ** Math.min(attempt, 4));
   }
@@ -142,21 +135,23 @@ async function requestWithRetry(path, payloadIn, { retries = 4, signal, provider
 }
 
 /**
- * Sohbet tamamlamayi akis halinde calistirir.
- * onEvent({type:'reasoning'|'content', text}) her parcada cagrilir.
- * Donus: { content, reasoning, usage, model }
+ * Executes a streaming chat completion.
+ * onEvent({ type: 'reasoning'|'content', text }) is called for each chunk.
  */
 export async function streamChat(payload, { onEvent, signal, provider = 'openrouter' } = {}) {
   const res = await requestWithRetry(
-    '/chat/completions', { ...payload, stream: true }, { signal, provider });
+    '/chat/completions',
+    { ...payload, stream: true },
+    { signal, provider }
+  );
 
   const reader = res.body.getReader();
-  const decoder = new TextDecoder();
+  const decoder = new TextDecoder('utf-8');
   let buffer = '';
   let content = '';
   let reasoning = '';
   let usage = null;
-  let model = payload.model;
+  let responseModel = null;
 
   try {
     while (true) {
@@ -164,7 +159,6 @@ export async function streamChat(payload, { onEvent, signal, provider = 'openrou
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      // SSE olaylari satir satir gelir; son yarim satiri tamponda birak.
       let nl;
       while ((nl = buffer.indexOf('\n')) !== -1) {
         const line = buffer.slice(0, nl).trim();
@@ -173,32 +167,46 @@ export async function streamChat(payload, { onEvent, signal, provider = 'openrou
         const data = line.slice(5).trim();
         if (data === '[DONE]') continue;
 
-        let chunk;
-        try { chunk = JSON.parse(data); } catch { continue; }
-        if (chunk.error) {
-          throw new OpenRouterError(chunk.error.metadata?.raw || chunk.error.message || 'Akis hatasi', {
-            code: chunk.error.code, retryable: RETRYABLE.has(chunk.error.code), raw: chunk,
-          });
-        }
-        if (chunk.model) model = chunk.model;
-        if (chunk.usage) usage = chunk.usage;
+        let json;
+        try { json = JSON.parse(data); } catch { continue; }
 
-        const delta = chunk.choices?.[0]?.delta;
+        if (json.error) {
+          const detail = json.error.metadata?.raw || json.error.message || 'Stream error';
+          throw new OpenRouterError(detail, { status: json.error.code });
+        }
+
+        if (json.model && !responseModel) responseModel = json.model;
+        if (json.usage) usage = json.usage;
+
+        const delta = json.choices?.[0]?.delta;
         if (!delta) continue;
-        const think = delta.reasoning ?? delta.reasoning_content;
-        if (think) { reasoning += think; onEvent?.({ type: 'reasoning', text: think }); }
-        if (delta.content)   { content   += delta.content;   onEvent?.({ type: 'content',   text: delta.content   }); }
+
+        const thinkChunk = delta.reasoning ?? delta.reasoning_content;
+        if (thinkChunk) {
+          reasoning += thinkChunk;
+          onEvent?.({ type: 'reasoning', text: thinkChunk });
+        }
+
+        const textChunk = delta.content;
+        if (textChunk) {
+          content += textChunk;
+          onEvent?.({ type: 'content', text: textChunk });
+        }
       }
     }
   } finally {
-    reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
 
-  return { content, reasoning, usage, model };
+  return { content, reasoning, usage, model: responseModel || payload.model };
 }
 
-/** Akissiz istek - baslik uretimi ve gorsel uretimi icin. */
+/** Single non-streaming completion (used for titles and image generation). */
 export async function complete(payload, { signal, retries = 2, provider = 'openrouter' } = {}) {
-  const res = await requestWithRetry('/chat/completions', payload, { signal, retries, provider });
+  const res = await requestWithRetry(
+    '/chat/completions',
+    { ...payload, stream: false },
+    { retries, signal, provider }
+  );
   return res.json();
 }

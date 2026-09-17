@@ -1,4 +1,4 @@
-// .env icindeki anahtar ve model listesini tarayici tarafi yapilandirmasina cevirir.
+// Converts .env keys and model list into browser runtime config.
 import { readFileSync, writeFileSync } from 'node:fs';
 
 const [, , envPath, outPath] = process.argv;
@@ -41,5 +41,5 @@ const cfg = {
 };
 
 writeFileSync(outPath, 'window.OX_CONFIG = ' + JSON.stringify(cfg, null, 2) + ';\n');
-console.log(`  config.js: ${cfg.chatModels.length} model, `
-  + `${cfg.openrouterKeys.length} OpenRouter + ${cfg.hfKeys.length} HF anahtari`);
+console.log(`  config.js: ${cfg.chatModels.length} models, `
+  + `${cfg.openrouterKeys.length} OpenRouter + ${cfg.hfKeys.length} HF keys`);

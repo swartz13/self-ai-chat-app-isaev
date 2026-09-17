@@ -13,7 +13,7 @@ db.pragma('journal_mode = WAL');
 db.exec(`
 CREATE TABLE IF NOT EXISTS conversations (
   id          TEXT PRIMARY KEY,
-  title       TEXT NOT NULL DEFAULT 'Yeni sohbet',
+  title       TEXT NOT NULL DEFAULT 'New chat',
   model       TEXT,
   pinned      INTEGER NOT NULL DEFAULT 0,
   created_at  INTEGER NOT NULL,
@@ -54,7 +54,7 @@ const uid = () => (Date.now().toString(36) + Math.random().toString(36).slice(2,
 const parse = (s, fallback) => { try { return JSON.parse(s); } catch { return fallback; } };
 
 export const Conversations = {
-  create({ title = 'Yeni sohbet', model = null, id = uid() } = {}) {
+  create({ title = 'New chat', model = null, id = uid() } = {}) {
     const t = now();
     db.prepare(
       `INSERT INTO conversations (id,title,model,created_at,updated_at) VALUES (?,?,?,?,?)`
@@ -100,54 +100,71 @@ export const Conversations = {
 };
 
 export const Messages = {
-  add({ conversationId, role, content = '', reasoning = null, attachments = [], images = [], meta = {} }) {
-    const id = uid();
+  add({
+    conversationId, role, content = '', reasoning = null,
+    attachments = [], images = [], meta = {}, id = uid(),
+  }) {
+    const t = now();
     db.prepare(
       `INSERT INTO messages (id,conversation_id,role,content,reasoning,attachments,images,meta,created_at)
        VALUES (?,?,?,?,?,?,?,?,?)`
-    ).run(id, conversationId, role, content, reasoning,
-          JSON.stringify(attachments), JSON.stringify(images), JSON.stringify(meta), now());
+    ).run(
+      id, conversationId, role, content, reasoning,
+      JSON.stringify(attachments), JSON.stringify(images), JSON.stringify(meta), t
+    );
     Conversations.touch(conversationId);
     return this.get(id);
   },
   get(id) {
     const row = db.prepare(`SELECT * FROM messages WHERE id = ?`).get(id);
-    return row ? hydrate(row) : null;
+    if (!row) return null;
+    return {
+      ...row,
+      attachments: parse(row.attachments, []),
+      images: parse(row.images, []),
+      meta: parse(row.meta, {}),
+    };
   },
   listByConversation(conversationId) {
-    return db.prepare(
-      `SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC`
-    ).all(conversationId).map(hydrate);
+    return db.prepare(`SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC`)
+      .all(conversationId)
+      .map((r) => ({
+        ...r,
+        attachments: parse(r.attachments, []),
+        images: parse(r.images, []),
+        meta: parse(r.meta, {}),
+      }));
   },
-  /** Bir mesaj ve sonrasindaki her seyi siler (duzenle / yeniden uret icin). */
   removeFrom(conversationId, messageId) {
-    const target = db.prepare(`SELECT created_at, rowid FROM messages WHERE id = ?`).get(messageId);
-    if (!target) return;
-    db.prepare(
-      `DELETE FROM messages WHERE conversation_id = ?
-       AND (created_at > ? OR (created_at = ? AND rowid >= ?))`
-    ).run(conversationId, target.created_at, target.created_at, target.rowid);
+    const target = db.prepare(
+      `SELECT created_at FROM messages WHERE id = ? AND conversation_id = ?`
+    ).get(messageId, conversationId);
+    if (!target) return 0;
+    const res = db.prepare(
+      `DELETE FROM messages WHERE conversation_id = ? AND created_at >= ?`
+    ).run(conversationId, target.created_at);
+    Conversations.touch(conversationId);
+    return res.changes;
   },
 };
 
 export const Uploads = {
   add({ id = uid(), name, kind, mime, size = 0, path: diskPath, text = null, error = null }) {
+    const t = now();
     db.prepare(
-      `INSERT INTO uploads (id,name,kind,mime,size,path,text,error,created_at) VALUES (?,?,?,?,?,?,?,?,?)`
-    ).run(id, name, kind, mime, size, diskPath, text, error, now());
+      `INSERT INTO uploads (id,name,kind,mime,size,path,text,error,created_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`
+    ).run(id, name, kind, mime, size, diskPath, text, error, t);
     return this.get(id);
   },
-  get(id) { return db.prepare(`SELECT * FROM uploads WHERE id = ?`).get(id) ?? null; },
-  getMany(ids) { return ids.map((i) => this.get(i)).filter(Boolean); },
+  get(id) {
+    return db.prepare(`SELECT * FROM uploads WHERE id = ?`).get(id) ?? null;
+  },
+  getMany(ids) {
+    if (!ids || !ids.length) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    return db.prepare(`SELECT * FROM uploads WHERE id IN (${placeholders})`).all(...ids);
+  },
 };
-
-function hydrate(row) {
-  return {
-    ...row,
-    attachments: parse(row.attachments, []),
-    images: parse(row.images, []),
-    meta: parse(row.meta, {}),
-  };
-}
 
 export { uid };

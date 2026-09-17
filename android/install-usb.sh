@@ -1,40 +1,44 @@
 #!/usr/bin/env bash
 # ===================================================================
-# APK'yi USB uzerinden kurar. Telefonun kendi yukleyicisi "Uygulama
-# yuklenmedi" gibi anlamsiz bir mesaj verdiginde, bu yol GERCEK hata
-# kodunu gosterir.
+# Installs ISAEV APK over USB via ADB.
+# Bypasses device vendor sideload limitations and displays exact error codes.
 # ===================================================================
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ADB="${ANDROID_HOME:-/data/android-sdk}/platform-tools/adb"
-APK="$ROOT/OxAlpha.apk"
+APK="$ROOT/isaev.apk"
+if [ ! -f "$APK" ]; then
+  APK="$ROOT/OxAlpha.apk"
+fi
 
-[ -x "$ADB" ] || { echo "HATA: adb bulunamadi: $ADB"; exit 1; }
-[ -f "$APK" ] || { echo "HATA: OxAlpha.apk bulunamadi"; exit 1; }
+[ -x "$ADB" ] || { echo "ERROR: adb executable not found: $ADB"; exit 1; }
+[ -f "$APK" ] || { echo "ERROR: APK file not found at $APK"; exit 1; }
 
-echo "==> telefon araniyor"
+echo "==> Searching for connected Android device"
 "$ADB" start-server >/dev/null 2>&1
 DEVICES=$("$ADB" devices | tail -n +2 | grep -v '^$' || true)
 echo "$DEVICES" | sed 's/^/    /'
 
 if echo "$DEVICES" | grep -q unauthorized; then
   echo
-  echo "  Telefonda 'USB hata ayiklamaya izin ver' penceresi cikti."
-  echo "  'Bu bilgisayara her zaman izin ver' isaretleyip Tamam'a basin, sonra tekrar calistirin."
+  echo "  Device is unauthorized."
+  echo "  Check your phone screen for the 'Allow USB debugging' dialog,"
+  echo "  check 'Always allow from this computer', tap OK, and re-run this script."
   exit 1
 fi
+
 if ! echo "$DEVICES" | grep -q device$; then
   echo
-  echo "  Telefon gorunmuyor. Sirasiyla:"
-  echo "    1) Ayarlar > Telefon hakkinda > Surum > 'Derleme numarasi'na 7 kez dokunun"
-  echo "    2) Ayarlar > Ek ayarlar > Gelistirici secenekleri > 'USB hata ayiklama' ACIK"
-  echo "    3) Ayni ekranda 'USB uzerinden yuklemeye izin ver' ACIK"
-  echo "    4) USB kablosunu takin, telefonda 'Dosya aktarimi (MTP)' secin"
+  echo "  No authorized device found. Troubleshooting steps:"
+  echo "    1) Settings > About phone > Version > tap 'Build number' 7 times"
+  echo "    2) Settings > Developer options > enable 'USB debugging'"
+  echo "    3) In Developer options > enable 'Install via USB'"
+  echo "    4) Reconnect the USB cable and select 'File Transfer (MTP)'"
   exit 1
 fi
 
 echo
-echo "==> telefon bilgisi"
+echo "==> Device information"
 for k in ro.product.manufacturer ro.product.model ro.build.version.release ro.build.version.sdk; do
   printf "    %-32s %s\n" "$k" "$("$ADB" shell getprop $k 2>/dev/null | tr -d '\r')"
 done
@@ -42,22 +46,21 @@ done
 SDK=$("$ADB" shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r')
 if [ -n "$SDK" ] && [ "$SDK" -lt 24 ] 2>/dev/null; then
   echo
-  echo "  UYARI: Telefon API $SDK (Android 7'den eski). Bu APK en az API 24 istiyor."
-  echo "  Cozum icin bunu bana bildirin, daha eski surumu destekleyecek sekilde yeniden derleyeyim."
+  echo "  WARNING: Device is running API level $SDK (requires Android 7.0 / API 24+)."
   exit 1
 fi
 
 echo
-echo "==> kuruluyor (gercek hata mesaji asagida)"
+echo "==> Installing APK"
 "$ADB" install -r -d "$APK"
 CODE=$?
 
 if [ $CODE -eq 0 ]; then
   echo
-  echo "==> baslatiliyor"
+  echo "==> Launching application"
   "$ADB" shell am start -n com.oxalpha.chat/.MainActivity >/dev/null 2>&1
-  echo "  Kuruldu ve acildi."
+  echo "  Successfully installed and launched ISAEV."
 else
   echo
-  echo "  Kurulum basarisiz. Yukaridaki INSTALL_FAILED_... satirini bana iletin."
+  echo "  Installation failed. Please review the INSTALL_FAILED_... error above."
 fi
