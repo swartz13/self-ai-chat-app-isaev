@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Secrets & Local Environment
+.env
+.env.*
+!.env.example
+
+# Local Database & Uploads
+data/
+*.db
+*.sqlite
+
+# Logs & Temporary Files
+*.log
+scratch/
+.DS_Store
+*.tmp
+
+# Android Build Artifacts & Signing Keystores
+android/build/
+android/assets/www/
+android/oxalpha.keystore
+*.apk
+*.idsig
+
+# IDE / Editor Files
+.idea/
+.vscode/
+

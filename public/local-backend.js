@@ -1,0 +1,973 @@
+/* ===================================================================
+   Sunucusuz arka uc (Android/WebView derlemesi icin).
+
+   Masaustunde arayuz "/api/..." adreslerine istek atar ve Node sunucusu
+   yanit verir. Telefonda Node yok; bu dosya fetch'i sarmalayip ayni
+   adresleri tarayici icinde karsilar. Boylece app.js hic degismeden
+   iki ortamda da calisir.
+
+   Depolama: IndexedDB (SQLite yerine)
+   Dosyalar: Blob + blob: URL (disk yerine)
+   =================================================================== */
+(function () {
+  'use strict';
+
+  const CFG = window.OX_CONFIG || {};
+  const CHAT_MODELS = CFG.chatModels || [];
+  const IMAGE_MODEL = CFG.imageModel || 'google/gemini-2.5-flash-image';
+  const IMAGE_MAX_TOKENS = CFG.imageMaxTokens || 4096;
+
+  const PROVIDERS = {
+    openrouter: {
+      base: 'https://openrouter.ai/api/v1',
+      label: 'OpenRouter',
+      keys: () => {
+        const custom = (localStorage.getItem('ox.custom_openrouter_key') || '').trim();
+        if (custom) return [custom];
+        return CFG.openrouterKeys || [];
+      },
+      extraHeaders: { 'HTTP-Referer': 'https://localhost', 'X-Title': 'ISAEV' },
+    },
+    hf: {
+      base: 'https://router.huggingface.co/v1',
+      label: 'HuggingFace',
+      keys: () => {
+        const custom = (localStorage.getItem('ox.custom_hf_key') || '').trim();
+        if (custom) return [custom];
+        return CFG.hfKeys || [];
+      },
+      extraHeaders: {},
+    },
+  };
+
+  function splitModel(id) {
+    const raw = String(id || '');
+    for (const name of Object.keys(PROVIDERS)) {
+      if (raw.startsWith(name + ':')) return { provider: name, model: raw.slice(name.length + 1) };
+    }
+    return { provider: 'openrouter', model: raw };
+  }
+
+  for (const m of CHAT_MODELS) {
+    m.provider = splitModel(m.id).provider;
+    m.providerLabel = PROVIDERS[m.provider].label;
+  }
+  const USABLE = CHAT_MODELS.filter((m) => PROVIDERS[m.provider].keys().length > 0);
+  const MODELS = USABLE.length ? USABLE : CHAT_MODELS;
+  const DEFAULT_MODEL = (MODELS[0] || {}).id || 'stealth/ox-alpha';
+
+  function buildSystemPrompt(lang, userName, customInstructions) {
+    const langNames = {
+      tr: 'Türkçe',
+      en: 'English',
+      ru: 'Русский',
+      de: 'Deutsch',
+    };
+    const targetLang = langNames[lang] || 'Türkçe';
+
+    let sys = `You are a helpful, expert AI assistant.
+Language instructions:
+- The user's active interface language is ${targetLang} (${lang || 'tr'}).
+- CRITICAL LANGUAGE RULE: ALWAYS detect and match the language used by the user in their message. If the user asks in English, reply entirely in English. If the user asks in Turkish, reply in Turkish. If the user asks in Russian, reply in Russian. If the user asks in German, reply in German.
+- If the language of the user query is ambiguous, reply in the user's preferred interface language: ${targetLang}.
+- Format your response using clean Markdown. Always specify the programming language on code blocks (e.g. \`\`\`html, \`\`\`python, \`\`\`javascript).
+- When generating HTML games or web applications, provide complete, self-contained single-file HTML (including all necessary CSS and JavaScript in <style> and <script> tags). Make them mobile-friendly: support BOTH touchscreen touch/tap events AND keyboard controls so they can be played on mobile touchscreens without a physical keyboard.
+- When document, image, or video attachments are provided, examine them carefully and provide factual, concrete analysis. Never invent facts.`;
+
+    if (userName && String(userName).trim()) {
+      sys += `\nUser's name / salutation: ${String(userName).trim()}.`;
+    }
+    if (customInstructions && String(customInstructions).trim()) {
+      sys += `\nUser's custom instructions:\n${String(customInstructions).trim()}`;
+    }
+    return sys;
+  }
+
+  const IDENTITY_NOTE = `ONEMLI: Bu sohbetteki onceki asistan yanitlarinin bir kismi SENIN degil,
+  su modellerin urunudur: {{DIGERLERI}}. Sen onlardan biri DEGILSIN; onlarin kimligini ustlenme,
+  onlarin verdigi kimlik yanitini tekrarlama. Kim oldugun sorulursa kendi gercek kimligini
+  kendi bildigin sekilde soyle. Bu notu yanitinda anma, buradaki teknik kimlikleri aynen yazma,
+  yanitinin basina model adi veya koseli parantezli etiket EKLEME.`;
+
+  /** Model yine de basa "[... yaniti]" eklerse temizle. */
+  function stripModelTag(text) {
+    return String(text || '').replace(/^\s*\[[^\]\n]{1,80}?\s*yaniti\]\s*\n?/i, '');
+  }
+
+  /* ================================================================ IndexedDB */
+
+  const DB_NAME = 'oxalpha';
+  let dbPromise = null;
+
+  function openDb() {
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains('conversations')) {
+          db.createObjectStore('conversations', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('messages')) {
+          const s = db.createObjectStore('messages', { keyPath: 'id' });
+          s.createIndex('conversation_id', 'conversation_id', { unique: false });
+        }
+        if (!db.objectStoreNames.contains('uploads')) {
+          db.createObjectStore('uploads', { keyPath: 'id' });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return dbPromise;
+  }
+
+  async function tx(store, mode, fn) {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+      const t = db.transaction(store, mode);
+      const result = fn(t.objectStore(store));
+      t.oncomplete = () => resolve(result && result.__value !== undefined ? result.__value : result);
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error);
+    });
+  }
+
+  const asPromise = (req) => new Promise((res, rej) => {
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  });
+
+  const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  const now = () => Date.now();
+
+  /* ================================================================ veri katmani */
+
+  async function getAll(store) {
+    const db = await openDb();
+    return asPromise(db.transaction(store, 'readonly').objectStore(store).getAll());
+  }
+  async function getOne(store, id) {
+    const db = await openDb();
+    return asPromise(db.transaction(store, 'readonly').objectStore(store).get(id));
+  }
+  async function put(store, value) {
+    const db = await openDb();
+    const t = db.transaction(store, 'readwrite');
+    t.objectStore(store).put(value);
+    await new Promise((res, rej) => { t.oncomplete = res; t.onerror = () => rej(t.error); });
+    return value;
+  }
+  async function del(store, id) {
+    const db = await openDb();
+    const t = db.transaction(store, 'readwrite');
+    t.objectStore(store).delete(id);
+    await new Promise((res, rej) => { t.oncomplete = res; t.onerror = () => rej(t.error); });
+  }
+
+  async function messagesOf(conversationId) {
+    const db = await openDb();
+    const idx = db.transaction('messages', 'readonly').objectStore('messages').index('conversation_id');
+    const rows = await asPromise(idx.getAll(conversationId));
+    return rows.sort((a, b) => a.created_at - b.created_at);
+  }
+
+  async function conversationList() {
+    const rows = await getAll('conversations');
+    const msgs = await getAll('messages');
+    const counts = {};
+    for (const m of msgs) counts[m.conversation_id] = (counts[m.conversation_id] || 0) + 1;
+    for (const c of rows) {
+      if (c.title && (/^<!DOCTYPE|^<html/i.test(c.title) || c.title.includes('<!DOCTYPE'))) {
+        c.title = 'Flappy Bird Oyunu';
+        put('conversations', c).catch(() => {});
+      }
+    }
+    return rows
+      .map((c) => ({ ...c, message_count: counts[c.id] || 0 }))
+      .sort((a, b) => (b.pinned - a.pinned) || (b.updated_at - a.updated_at));
+  }
+
+  async function newConversation(model) {
+    const t = now();
+    return put('conversations', {
+      id: uid(), title: 'Yeni sohbet', model: model || DEFAULT_MODEL,
+      pinned: 0, created_at: t, updated_at: t,
+    });
+  }
+
+  async function addMessage(m) {
+    const row = {
+      id: uid(), conversation_id: m.conversationId, role: m.role,
+      content: m.content || '', reasoning: m.reasoning || null,
+      attachments: m.attachments || [], images: m.images || [],
+      meta: m.meta || {}, created_at: now(),
+    };
+    await put('messages', row);
+    const conv = await getOne('conversations', m.conversationId);
+    if (conv) { conv.updated_at = now(); await put('conversations', conv); }
+    return row;
+  }
+
+  async function deleteConversation(id) {
+    for (const m of await messagesOf(id)) await del('messages', m.id);
+    await del('conversations', id);
+  }
+
+  /* ---- blob: adresleri oturum basina yeniden uretilir ---- */
+  const blobUrls = new Map();
+  async function urlFor(uploadId) {
+    if (blobUrls.has(uploadId)) return blobUrls.get(uploadId);
+    const row = await getOne('uploads', uploadId);
+    if (!row || !row.blob) return null;
+    const url = URL.createObjectURL(row.blob);
+    blobUrls.set(uploadId, url);
+    return url;
+  }
+
+  async function withUrls(list) {
+    const out = [];
+    for (const a of list || []) {
+      out.push(a.kind === 'image' || a.kind === 'video'
+        ? { ...a, url: await urlFor(a.id) }
+        : a);
+    }
+    return out;
+  }
+
+  async function hydrateMessages(rows) {
+    const out = [];
+    for (const m of rows) {
+      out.push({
+        ...m,
+        attachments: await withUrls(m.attachments),
+        images: await withUrls(m.images),
+      });
+    }
+    return out;
+  }
+
+  /* ================================================================ dosyalar */
+
+  const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'heic', 'heif']);
+  const VIDEO_EXT = new Set(['mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v']);
+  const AUDIO_EXT = new Set(['mp3', 'wav', 'ogg', 'm4a', 'flac']);
+  const TEXT_EXT = new Set(['txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'jsonl', 'yaml', 'yml',
+    'xml', 'html', 'htm', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'py', 'rb', 'go', 'rs', 'java',
+    'kt', 'c', 'h', 'cpp', 'hpp', 'cs', 'php', 'sh', 'bash', 'zsh', 'sql', 'ini', 'toml', 'conf',
+    'env', 'log', 'svg', 'vue', 'svelte', 'css', 'scss', 'dart', 'swift', 'r', 'lua', 'pl']);
+
+  const MIME = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
+    bmp: 'image/bmp', heic: 'image/heic', heif: 'image/heif',
+    mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', mkv: 'video/x-matroska',
+    avi: 'video/x-msvideo', m4v: 'video/mp4',
+    mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', flac: 'audio/flac',
+    pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', csv: 'text/csv',
+    json: 'application/json', html: 'text/html',
+  };
+
+  const MAX_TEXT_CHARS = 400000;
+
+  function readAs(file, how) {
+    return new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result);
+      r.onerror = () => rej(r.error);
+      how === 'text' ? r.readAsText(file) : r.readAsArrayBuffer(file);
+    });
+  }
+
+  const toBase64 = (buf) => {
+    const bytes = new Uint8Array(buf);
+    let s = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(s);
+  };
+
+  async function inspectFile(file) {
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    const mime = file.type || MIME[ext] || 'application/octet-stream';
+
+    if (IMAGE_EXT.has(ext) || (file.type || '').startsWith('image/')) return { kind: 'image', mime };
+    if (VIDEO_EXT.has(ext) || (file.type || '').startsWith('video/')) return { kind: 'video', mime };
+    if (AUDIO_EXT.has(ext)) return { kind: 'audio', mime };
+    if (ext === 'pdf') return { kind: 'pdf', mime: 'application/pdf' };
+
+    if (ext === 'docx') {
+      if (!window.mammoth) return { kind: 'unsupported', mime, error: 'DOCX okuyucu yuklenemedi.' };
+      try {
+        const buf = await readAs(file, 'buffer');
+        const { value } = await window.mammoth.extractRawText({ arrayBuffer: buf });
+        return { kind: 'text', mime, text: (value || '').trim() };
+      } catch (e) {
+        return { kind: 'unsupported', mime, error: 'DOCX okunamadi: ' + e.message };
+      }
+    }
+
+    if (TEXT_EXT.has(ext) || !ext) {
+      const buf = await readAs(file, 'buffer');
+      if (new Uint8Array(buf).includes(0)) {
+        return { kind: 'unsupported', mime, error: 'Ikili dosya, metne cevrilemedi.' };
+      }
+      return { kind: 'text', mime, text: new TextDecoder().decode(buf) };
+    }
+    return { kind: 'unsupported', mime, error: (ext || 'bilinmeyen') + ' uzantisi desteklenmiyor.' };
+  }
+
+  async function buildContentParts(text, rows) {
+    const parts = [];
+    const notes = [];
+    let needsPdfPlugin = false;
+
+    for (const r of rows) {
+      if (r.kind === 'image' || r.kind === 'video') {
+        const b64 = toBase64(await readAs(r.blob, 'buffer'));
+        const url = `data:${r.mime};base64,${b64}`;
+        parts.push(r.kind === 'image'
+          ? { type: 'image_url', image_url: { url } }
+          : { type: 'video_url', video_url: { url } });
+        continue;
+      }
+      if (r.kind === 'pdf') {
+        const b64 = toBase64(await readAs(r.blob, 'buffer'));
+        parts.push({ type: 'file', file: { filename: r.name, file_data: `data:application/pdf;base64,${b64}` } });
+        needsPdfPlugin = true;
+        continue;
+      }
+      if (r.kind === 'text') {
+        let body = r.text || '';
+        if (body.length > MAX_TEXT_CHARS) {
+          body = body.slice(0, MAX_TEXT_CHARS);
+          notes.push(`${r.name} cok uzun oldugu icin ilk ${MAX_TEXT_CHARS} karakteri alindi.`);
+        }
+        parts.push({ type: 'text', text: `<dosya adi="${r.name}">\n${body}\n</dosya>` });
+        continue;
+      }
+      if (r.kind === 'audio') { notes.push(`${r.name}: ses girdisi desteklenmiyor, atlandi.`); continue; }
+      notes.push(`${r.name}: ${r.error || 'desteklenmeyen dosya'}, atlandi.`);
+    }
+
+    if (text && text.trim()) parts.push({ type: 'text', text });
+    if (!parts.length) parts.push({ type: 'text', text: '(bos mesaj)' });
+    return { parts, needsPdfPlugin, notes };
+  }
+
+  /* ================================================================ saglayici istemcisi */
+
+  class ApiError extends Error {
+    constructor(message, { status, retryable = false, provider } = {}) {
+      super(message);
+      this.status = status;
+      this.retryable = retryable;
+      this.provider = provider;
+    }
+  }
+
+  const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
+  const KEY_SWITCH = new Set([401, 402, 403, 429]);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const cursor = {};
+
+  async function toError(res, provider) {
+    let body = null;
+    try { body = await res.json(); } catch { /* metin */ }
+    const err = typeof body?.error === 'string' ? { message: body.error } : (body?.error || {});
+    const detail = err.metadata?.raw || err.message || body?.message
+      || res.headers.get('x-error-message') || res.statusText;
+    return new ApiError(detail, { status: res.status, retryable: RETRYABLE.has(res.status), provider });
+  }
+
+  async function request(payloadIn, { provider = 'openrouter', signal, retries = 4 } = {}) {
+    const cfg = PROVIDERS[provider];
+    const keys = cfg.keys();
+    if (!keys.length) throw new ApiError(`${cfg.label} icin API anahtari tanimli degil.`, { provider });
+    if (cursor[provider] == null) cursor[provider] = 0;
+
+    let payload = payloadIn;
+    let last;
+    const total = retries + keys.length;
+
+    for (let attempt = 0; attempt <= total; attempt++) {
+      if (signal?.aborted) throw new ApiError('Istek iptal edildi.', { provider });
+      const key = keys[cursor[provider] % keys.length];
+      let res;
+      try {
+        res = await fetchOriginal(`${cfg.base}/chat/completions`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', ...cfg.extraHeaders },
+          body: JSON.stringify(payload),
+          signal,
+        });
+      } catch (e) {
+        if (e.name === 'AbortError') throw new ApiError('Istek iptal edildi.', { provider });
+        last = new ApiError('Aga ulasilamadi: ' + e.message, { retryable: true, provider });
+        await sleep(600 * 2 ** Math.min(attempt, 4));
+        continue;
+      }
+      if (res.ok) return res;
+
+      last = await toError(res, provider);
+
+      const capped = /limited to (\d+)/i.exec(last.message || '');
+      if (capped && payload.max_tokens > Number(capped[1])) {
+        payload = { ...payload, max_tokens: Number(capped[1]) };
+        continue;
+      }
+      if (keys.length > 1 && KEY_SWITCH.has(last.status)) {
+        cursor[provider] = (cursor[provider] + 1) % keys.length;
+        last.retryable = true;
+        if (attempt < total) continue;
+      }
+      if (!last.retryable || attempt === total) throw last;
+      const hinted = Number(res.headers.get('retry-after')) * 1000;
+      await sleep(Number.isFinite(hinted) && hinted > 0 ? Math.min(hinted, 15000) : 800 * 2 ** Math.min(attempt, 4));
+    }
+    throw last;
+  }
+
+  function hintFor(e) {
+    const msg = String(e?.message || '');
+    const code = e?.status;
+    if (e?.provider === 'hf' || /included credits|Inference Providers/i.test(msg)) {
+      if (/depleted|included credits/i.test(msg)) {
+        return 'HuggingFace\'in aylik ucretsiz kredisi tukendi. Ayin basinda yenilenir.';
+      }
+      if (code === 401 || code === 403) return 'HuggingFace anahtari reddedildi.';
+      return null;
+    }
+    if (/free-models-per-day/i.test(msg)) {
+      return 'OpenRouter\'in gunluk bedava model kotasi doldu (bakiyesiz hesaplarda gunde ~50 istek). '
+        + 'Kota yarin sifirlanir. "Ox Alpha" bu kotaya dahil degildir.';
+    }
+    if (code === 429 || /rate.?limit/i.test(msg)) return 'Model su an yogun, birkac saniye sonra tekrar deneyin.';
+    if (/for video/i.test(msg)) return 'Video girdisi en az 1 USD bakiye gerektiriyor.';
+    if (code === 402 || /balance|afford|more credits/i.test(msg)) {
+      return 'OpenRouter bakiyeniz yetersiz. Gorsel uretimi ucretli bir modele gidiyor.';
+    }
+    if (code === 401 || code === 403) return 'API anahtari reddedildi.';
+    return null;
+  }
+
+  const withHint = (e) => {
+    const h = hintFor(e);
+    return (e.message || 'Bilinmeyen hata') + (h ? ' — ' + h : '');
+  };
+
+  /* ================================================================ uc noktalar */
+
+  const json = (data, status = 200) =>
+    new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
+
+  /**
+   * Model yeteneklerini (baglam uzunlugu, gorsel girdi) saglayici
+   * kataloglarindan bir kez ceker. Basarisiz olursa uygulama yine calisir,
+   * sadece bu ayrintilar bos kalir.
+   */
+  let capsPromise = null;
+  function modelCaps() {
+    if (capsPromise) return capsPromise;
+    capsPromise = (async () => {
+      const caps = {};
+      const add = (id, ctx, mods) => {
+        caps[id] = { context: ctx || 0, vision: (mods || []).includes('image') };
+      };
+      try {
+        const r = await fetchOriginal('https://openrouter.ai/api/v1/models');
+        for (const m of (await r.json()).data || []) {
+          add(m.id, m.context_length, m.architecture?.input_modalities);
+        }
+      } catch { /* katalog yoksa sorun degil */ }
+      if ((CFG.hfKeys || []).length) {
+        try {
+          const r = await fetchOriginal('https://router.huggingface.co/v1/models');
+          for (const m of (await r.json()).data || []) {
+            const ctx = Math.max(0, ...(m.providers || []).map((x) => x.context_length || 0));
+            add('hf:' + m.id, ctx, m.architecture?.input_modalities);
+          }
+        } catch { /* yoksay */ }
+      }
+      return caps;
+    })();
+    return capsPromise;
+  }
+
+  let creditCache = { at: 0, info: null };
+  async function checkCredits() {
+    if (Date.now() - creditCache.at < 60_000 && creditCache.info) return creditCache.info;
+    try {
+      const custom = (localStorage.getItem('ox.custom_openrouter_key') || '').trim();
+      const key = custom || (CFG.openrouterKeys || [])[0];
+      if (!key) return null;
+      const r = await fetchOriginal('https://openrouter.ai/api/v1/credits', {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      const j = await r.json();
+      const total = j?.data?.total_credits ?? 0;
+      const usage = j?.data?.total_usage ?? 0;
+      const left = total - usage;
+      creditCache = { at: Date.now(), info: { credits: left, total, usage } };
+      return creditCache.info;
+    } catch {
+      return null;
+    }
+  }
+
+  async function handleConfig() {
+    const caps = await modelCaps();
+    const creditInfo = await checkCredits();
+    const credits = creditInfo ? creditInfo.credits : null;
+    return json({
+      // OpenRouter gunluk kotasina tabi olmayanlar (HF ayri krediye tabi, dahil degil).
+      unmetered: MODELS
+        .filter((m) => m.provider === 'openrouter' && !m.id.endsWith(':free') && m.id !== 'openrouter/free')
+        .map((m) => m.id),
+      chatModel: DEFAULT_MODEL,
+      chatModels: MODELS.map((m) => ({
+        ...m,
+        context: caps[m.id]?.context ?? null,
+        vision: caps[m.id]?.vision ?? null,
+      })),
+      imageModel: IMAGE_MODEL,
+      imageGeneration: (CFG.openrouterKeys || []).length > 0,
+      credits,
+      creditDetails: creditInfo,
+      videoGeneration: false,
+      videoUnderstanding: true,
+      efforts: ['low', 'high', 'max'],
+      defaultEffort: 'high',
+    });
+  }
+
+  async function handleUpload(body) {
+    const files = body.getAll('files');
+    const out = [];
+    for (const file of files) {
+      const info = await inspectFile(file);
+      const row = {
+        id: uid(), name: file.name, kind: info.kind, mime: info.mime,
+        size: file.size, blob: file, text: info.text || null, error: info.error || null,
+        created_at: now(),
+      };
+      await put('uploads', row);
+      out.push({
+        id: row.id, name: row.name, kind: row.kind, mime: row.mime, size: row.size,
+        error: row.error,
+        url: row.kind === 'image' || row.kind === 'video' ? await urlFor(row.id) : null,
+      });
+    }
+    return json({ files: out });
+  }
+
+  async function handleImport(body) {
+    const { conversations = [], messages = [] } = body || {};
+    let cCount = 0, mCount = 0;
+    for (const c of conversations) {
+      const existing = await getOne('conversations', c.id);
+      if (!existing) {
+        await put('conversations', {
+          id: c.id,
+          title: c.title || 'İçe aktarılan sohbet',
+          model: c.model || DEFAULT_MODEL,
+          pinned: !!c.pinned,
+          created_at: c.created_at || Date.now(),
+          updated_at: c.updated_at || Date.now(),
+        });
+        cCount++;
+      }
+    }
+    for (const m of messages) {
+      try {
+        const convId = m.conversation_id || m.conversationId;
+        await put('messages', {
+          id: m.id || uid(),
+          conversation_id: convId,
+          role: m.role,
+          content: m.content || '',
+          reasoning: m.reasoning || null,
+          attachments: m.attachments || [],
+          images: m.images || [],
+          meta: m.meta || {},
+          created_at: m.created_at || Date.now(),
+        });
+        mCount++;
+      } catch { }
+    }
+    return json({ ok: true, conversations: cCount, messages: mCount });
+  }
+
+  async function handleChat(body, signal) {
+    const { conversationId, text = '', attachmentIds = [], effort = 'high',
+            regenerate = false, model: wanted,
+            webSearch = false, customInstructions = '', userName = '', lang = 'tr' } = body;
+    const model = MODELS.some((m) => m.id === wanted) ? wanted : DEFAULT_MODEL;
+
+    let conversation = conversationId ? await getOne('conversations', conversationId) : null;
+    if (!conversation) conversation = await newConversation(model);
+    if (conversation.model !== model) {
+      conversation.model = model;
+      await put('conversations', conversation);
+    }
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        const enc = new TextEncoder();
+        const send = (o) => controller.enqueue(enc.encode('data: ' + JSON.stringify(o) + '\n\n'));
+
+        try {
+          if (regenerate) {
+            const all = await messagesOf(conversation.id);
+            const last = all[all.length - 1];
+            if (last && last.role === 'assistant') await del('messages', last.id);
+          }
+
+          let notes = [];
+          if (!regenerate) {
+            const rows = [];
+            for (const id of attachmentIds) {
+              const r = await getOne('uploads', id);
+              if (r) rows.push(r);
+            }
+            const userMessage = await addMessage({
+              conversationId: conversation.id, role: 'user', content: text,
+              attachments: rows.map((r) => ({
+                id: r.id, name: r.name, kind: r.kind, mime: r.mime, size: r.size, error: r.error,
+              })),
+            });
+            send({ type: 'user_message', message: (await hydrateMessages([userMessage]))[0] });
+          }
+
+          const history = await messagesOf(conversation.id);
+          const sysContent = buildSystemPrompt(lang, userName, customInstructions);
+          const messages = [{ role: 'system', content: sysContent }];
+          let needsPdfPlugin = false;
+          // Etiketi asistan metnine gomunce model onu kendi yanitina kopyaliyordu;
+          // bu yuzden bilgi yalnizca sistem mesajinda verilir.
+          const otherModels = new Set();
+
+          for (const m of history) {
+            if (m.role === 'assistant') {
+              const author = m.meta?.model;
+              if (author && author !== model) otherModels.add(author);
+              messages.push({ role: 'assistant', content: m.content || '(bos)' });
+              continue;
+            }
+            const rows = [];
+            for (const a of m.attachments || []) {
+              const r = await getOne('uploads', a.id);
+              if (r) rows.push(r);
+            }
+            const built = await buildContentParts(m.content, rows);
+            needsPdfPlugin = needsPdfPlugin || built.needsPdfPlugin;
+            if (m.id === history[history.length - 1]?.id) notes = built.notes;
+            messages.push({ role: 'user', content: built.parts });
+          }
+          // Kimlik notu son kullanici mesajinin hemen onune ayri bir sistem
+          // mesaji olarak girer; boylece hem etkili olur hem de yanita sizmaz.
+          if (otherModels.size) {
+            const names = [...otherModels].map((mid) =>
+              (MODELS.find((m) => m.id === mid) || {}).label || mid);
+            const note = IDENTITY_NOTE.replace('{{DIGERLERI}}', names.join(', '));
+            messages.splice(messages.length - 1, 0, { role: 'system', content: note });
+          }
+
+          const { provider, model: bare } = splitModel(model);
+          const payload = {
+            model: bare, messages,
+            max_tokens: provider === 'hf' ? 8192 : 32768,
+          };
+          if (provider === 'openrouter') {
+            payload.reasoning = { effort: ['low', 'high', 'max'].includes(effort) ? effort : 'high' };
+            payload.usage = { include: true };
+            const plugins = [];
+            if (needsPdfPlugin) plugins.push({ id: 'file-parser', pdf: { engine: 'pdf-text' } });
+            if (webSearch) plugins.push({ id: 'web' });
+            if (plugins.length) payload.plugins = plugins;
+          } else {
+            if (needsPdfPlugin) notes.push('Bu model PDF ayristirmayi desteklemiyor; PDF icerigi gonderilemedi.');
+            if (webSearch) notes.push('Web arama ozelligi yalnizca OpenRouter modelleri tarafindan destekleniyor.');
+          }
+
+          send({ type: 'start', conversationId: conversation.id, notes });
+
+          const res = await request({ ...payload, stream: true }, { provider, signal });
+          const reader = res.body.getReader();
+          const dec = new TextDecoder();
+          let buf = '';
+          let content = '';
+          let reasoning = '';
+          let usage = null;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            let nl;
+            while ((nl = buf.indexOf('\n')) !== -1) {
+              const line = buf.slice(0, nl).trim();
+              buf = buf.slice(nl + 1);
+              if (!line.startsWith('data:')) continue;
+              const data = line.slice(5).trim();
+              if (data === '[DONE]') continue;
+              let chunk;
+              try { chunk = JSON.parse(data); } catch { continue; }
+              if (chunk.error) throw new ApiError(chunk.error.metadata?.raw || chunk.error.message || 'Akis hatasi',
+                { status: chunk.error.code, provider });
+              if (chunk.usage) usage = chunk.usage;
+              const d = chunk.choices?.[0]?.delta;
+              if (!d) continue;
+              const think = d.reasoning ?? d.reasoning_content;
+              if (think) { reasoning += think; send({ type: 'reasoning', text: think }); }
+              if (d.content) { content += d.content; send({ type: 'content', text: d.content }); }
+            }
+          }
+
+          const assistantMessage = await addMessage({
+            conversationId: conversation.id, role: 'assistant',
+            content: stripModelTag(content), reasoning: reasoning || null,
+            meta: { model, usage, effort: payload.reasoning?.effort ?? null },
+          });
+
+          if (conversation.title === 'Yeni sohbet' || /^<!DOCTYPE|^<html/i.test(conversation.title)) {
+            let userPrompt = text;
+            if (!userPrompt || !userPrompt.trim()) {
+              const hist = await messagesOf(conversation.id);
+              const lastUser = [...hist].reverse().find((m) => m.role === 'user');
+              userPrompt = lastUser?.content || '';
+            }
+            conversation.title = await makeTitle(userPrompt, model);
+            conversation.updated_at = now();
+            await put('conversations', conversation);
+          }
+
+          send({
+            type: 'done',
+            message: assistantMessage,
+            conversation: await getOne('conversations', conversation.id),
+          });
+        } catch (e) {
+          send({ type: 'error', message: withHint(e), retryable: !!e.retryable });
+        } finally {
+          controller.close();
+        }
+      },
+    });
+
+    return new Response(stream, {
+      headers: { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache' },
+    });
+  }
+
+  function sanitizeTitleSeed(seed) {
+    if (!seed) return '';
+    let s = String(seed);
+    s = s.replace(/```[\s\S]*?```/g, ' ');
+    s = s.replace(/<[^>]+>/g, ' ');
+    s = s.replace(/<!DOCTYPE[^>]*>/gi, ' ');
+    return s.replace(/\s+/g, ' ').trim().slice(0, 300);
+  }
+
+  function makeFallbackTitle(seed) {
+    const clean = sanitizeTitleSeed(seed);
+    if (!clean) return 'Yeni sohbet';
+    let words = clean.split(' ').slice(0, 5).join(' ');
+    if (words.length > 40) words = words.slice(0, 40) + '…';
+    return words || 'Yeni sohbet';
+  }
+
+  function cleanGeneratedTitle(raw, fallback) {
+    if (!raw) return fallback;
+    let t = String(raw).trim();
+    t = t.replace(/```[\s\S]*?```/g, '');
+    t = t.replace(/<[^>]+>/g, '');
+    t = t.replace(/<!DOCTYPE[^>]*>/gi, '');
+    t = t.replace(/^["'#\s:.-]+|["'\s:.-]+$/g, '');
+    t = t.replace(/\s+/g, ' ').trim();
+    if (!t || t.length < 2 || /^(<!|doctype|html|<div|<script|function\b|const\b|let\b|var\b|import\b)/i.test(t)) {
+      return fallback;
+    }
+    return t.slice(0, 48);
+  }
+
+  async function makeTitle(seed, modelId) {
+    const cleanSeed = sanitizeTitleSeed(seed);
+    const fallback = makeFallbackTitle(cleanSeed);
+    if (!cleanSeed) return fallback;
+
+    try {
+      const { provider, model } = splitModel(modelId);
+      const body = {
+        model,
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a concise conversation title generator. Detect the language of the user request and output ONLY a 2 to 5 word title in that EXACT SAME language summarizing the request (English for English, Turkish for Turkish, Russian for Russian, German for German, etc.). Never output code, HTML, tags, quotes, or punctuation.',
+          },
+          {
+            role: 'user',
+            content: `Create a brief 2-5 word title in the exact same language as this request:\n"${cleanSeed}"`,
+          },
+        ],
+        max_tokens: 30,
+      };
+      if (provider === 'openrouter') body.reasoning = { effort: 'low' };
+      const res = await request(body, { provider, retries: 1 });
+      const out = await res.json();
+      const t = out?.choices?.[0]?.message?.content;
+      return cleanGeneratedTitle(t, fallback);
+    } catch {
+      return fallback;
+    }
+  }
+
+  async function handleImage(body) {
+    const { conversationId, prompt = '', attachmentIds = [] } = body;
+    if (!prompt.trim()) return json({ error: 'Gorsel icin bir aciklama yazin.' }, 400);
+
+    try {
+      const rows = [];
+      for (const id of attachmentIds) {
+        const r = await getOne('uploads', id);
+        if (r && r.kind === 'image') rows.push(r);
+      }
+      const { parts } = await buildContentParts(prompt, rows);
+
+      const call = (maxTokens) => request({
+        model: IMAGE_MODEL, messages: [{ role: 'user', content: parts }],
+        modalities: ['image', 'text'], max_tokens: maxTokens,
+      }, { provider: 'openrouter', retries: 2 });
+
+      let out;
+      try {
+        out = await (await call(IMAGE_MAX_TOKENS)).json();
+      } catch (e) {
+        const afford = /can only afford (\d+)/i.exec(e?.message || '');
+        if (!afford) throw e;
+        const budget = Math.floor(Number(afford[1]) * 0.9);
+        if (!(budget > 512) || budget >= IMAGE_MAX_TOKENS) throw e;
+        out = await (await call(budget)).json();
+      }
+
+      const message = out?.choices?.[0]?.message || {};
+      const saved = [];
+      for (const img of message.images || []) {
+        const url = img?.image_url?.url || '';
+        const m = /^data:(image\/[a-zA-Z+]+);base64,(.+)$/s.exec(url);
+        if (!m) continue;
+        const bin = atob(m[2]);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const blob = new Blob([bytes], { type: m[1] });
+        const id = uid();
+        await put('uploads', {
+          id, name: `uretilen-${id}.png`, kind: 'image', mime: m[1],
+          size: blob.size, blob, text: null, error: null, created_at: now(),
+        });
+        saved.push({ id, kind: 'image', mime: m[1], url: await urlFor(id) });
+      }
+      if (!saved.length) return json({ error: 'Model gorsel dondurmedi. Aciklamayi degistirip tekrar deneyin.' }, 502);
+
+      let conversation = conversationId ? await getOne('conversations', conversationId) : null;
+      if (!conversation) conversation = await newConversation(DEFAULT_MODEL);
+
+      const userMessage = await addMessage({
+        conversationId: conversation.id, role: 'user', content: prompt,
+        attachments: rows.map((r) => ({ id: r.id, name: r.name, kind: r.kind, mime: r.mime, size: r.size })),
+        meta: { mode: 'image' },
+      });
+      const assistantMessage = await addMessage({
+        conversationId: conversation.id, role: 'assistant',
+        content: message.content?.trim() || '', images: saved,
+        meta: { model: IMAGE_MODEL, mode: 'image', usage: out.usage || null },
+      });
+
+      if (conversation.title === 'Yeni sohbet') {
+        conversation.title = prompt.replace(/\s+/g, ' ').trim().slice(0, 48) || 'Gorsel';
+        await put('conversations', conversation);
+      }
+
+      return json({
+        conversation: await getOne('conversations', conversation.id),
+        userMessage: (await hydrateMessages([userMessage]))[0],
+        message: (await hydrateMessages([assistantMessage]))[0],
+      });
+    } catch (e) {
+      return json({ error: withHint(e), retryable: !!e.retryable }, e.status || 500);
+    }
+  }
+
+  /* ================================================================ yonlendirici */
+
+  const fetchOriginal = window.fetch.bind(window);
+
+  async function route(url, init) {
+    const path = url.pathname;
+    const method = (init?.method || 'GET').toUpperCase();
+    const bodyJson = async () => {
+      try { return typeof init?.body === 'string' ? JSON.parse(init.body) : {}; } catch { return {}; }
+    };
+
+    if (path === '/api/config') return handleConfig();
+
+    if (path === '/api/conversations' && method === 'GET') {
+      const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+      let list = await conversationList();
+      if (q) {
+        const msgs = await getAll('messages');
+        const hit = new Set(msgs.filter((m) => (m.content || '').toLowerCase().includes(q))
+          .map((m) => m.conversation_id));
+        list = list.filter((c) => c.title.toLowerCase().includes(q) || hit.has(c.id));
+      }
+      return json(list);
+    }
+    if (path === '/api/conversations' && method === 'POST') return json(await newConversation(DEFAULT_MODEL), 201);
+    if (path === '/api/conversations' && method === 'DELETE') {
+      for (const c of await getAll('conversations')) await deleteConversation(c.id);
+      return json({ ok: true });
+    }
+
+    const one = /^\/api\/conversations\/([A-Za-z0-9_-]+)$/.exec(path);
+    if (one) {
+      const id = one[1];
+      const conv = await getOne('conversations', id);
+      if (method === 'DELETE') { await deleteConversation(id); return json({ ok: true }); }
+      if (!conv) return json({ error: 'Sohbet bulunamadi.' }, 404);
+      if (conv.title && (/^<!DOCTYPE|^<html/i.test(conv.title) || conv.title.includes('<!DOCTYPE'))) {
+        conv.title = 'Flappy Bird Oyunu';
+        put('conversations', conv).catch(() => {});
+      }
+      if (method === 'GET') {
+        return json({ conversation: conv, messages: await hydrateMessages(await messagesOf(id)) });
+      }
+      if (method === 'PATCH') {
+        const b = await bodyJson();
+        if (typeof b.title === 'string') conv.title = b.title.trim() || 'Yeni sohbet';
+        if (typeof b.pinned === 'boolean') conv.pinned = b.pinned ? 1 : 0;
+        conv.updated_at = now();
+        await put('conversations', conv);
+        return json(conv);
+      }
+    }
+
+    if (path === '/api/upload' && method === 'POST') return handleUpload(init.body);
+    if (path === '/api/chat' && method === 'POST') return handleChat(await bodyJson(), init?.signal);
+    if (path === '/api/image' && method === 'POST') return handleImage(await bodyJson());
+    if (path === '/api/import' && method === 'POST') return handleImport(await bodyJson());
+
+    return json({ error: 'Bilinmeyen uc nokta: ' + path }, 404);
+  }
+
+  window.fetch = function (input, init) {
+    const raw = typeof input === 'string' ? input : (input && input.url) || '';
+    let url;
+    try { url = new URL(raw, location.href); } catch { return fetchOriginal(input, init); }
+    if (url.origin === location.origin && url.pathname.startsWith('/api/')) {
+      return route(url, init || {}).catch((e) => json({ error: withHint(e) }, 500));
+    }
+    return fetchOriginal(input, init);
+  };
+
+  window.OX_LOCAL = true;
+})();
